@@ -71,7 +71,7 @@ class PercentScheduler(hass.Hass):
                     attribute: Optional[str],
                     old: Any, new: Any, kwargs: Mapping[str, Any]):
         percent_entity = self.args.get(self.PERCENT_STATE_KEY)
-        min_on_seconds_entity = self.args.et(self.MIN_ON_SECONDS_STATE_KEY)
+        min_on_seconds_entity = self.args.get(self.MIN_ON_SECONDS_STATE_KEY)
         if attribute == percent_entity \
                 or attribute == min_on_seconds_entity:
             for handle in self._timers:
