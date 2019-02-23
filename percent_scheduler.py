@@ -82,7 +82,7 @@ class PercentScheduler(hass.Hass):
     def percent(self):
         percent_entity = self.args.get(self.PERCENT_STATE_KEY)
         if percent_entity:
-            return float(self.get_state(percent_entity) / 100)
+            return float(self.get_state(percent_entity)) / 100
         else:
             return float(self.args[self.PERCENT_KEY])
 
