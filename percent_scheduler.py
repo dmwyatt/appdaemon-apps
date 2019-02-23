@@ -74,8 +74,11 @@ class PercentScheduler(hass.Hass):
         min_on_seconds_entity = self.args.get(self.MIN_ON_SECONDS_STATE_KEY)
         if attribute == percent_entity \
                 or attribute == min_on_seconds_entity:
+            self.log('hass changed config')
             for handle in self._timers:
+                self.log('Canceling existing timer.')
                 self.cancel_timer(handle)
+            self.log('Rescheduling with new config.')
             self.on_then_off()
 
     @property
