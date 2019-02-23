@@ -72,6 +72,7 @@ class PercentScheduler(hass.Hass):
                     old: Any, new: Any, kwargs: Mapping[str, Any]):
         percent_entity = self.args.get(self.PERCENT_STATE_KEY)
         min_on_seconds_entity = self.args.get(self.MIN_ON_SECONDS_STATE_KEY)
+        self.log(f'{attribute} changed from {old} to {new}')
         if attribute == percent_entity \
                 or attribute == min_on_seconds_entity:
             self.log('hass changed config')
