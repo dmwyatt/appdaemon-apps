@@ -62,8 +62,8 @@ class PercentScheduler(hass.Hass):
         if percent_entity:
             self.log(f'Tracking percent from {percent_entity}')
             self.listen_state(self.track_state, percent_entity)
-        min_on_seconds_entity = self.MIN_ON_SECONDS_STATE_KEY
-        if self.args.get(min_on_seconds_entity):
+        min_on_seconds_entity = self.args.get(self.MIN_ON_SECONDS_STATE_KEY)
+        if min_on_seconds_entity:
             self.log(f'Tracking min on seconds from {min_on_seconds_entity}')
             self.listen_state(self.track_state, min_on_seconds_entity)
 
