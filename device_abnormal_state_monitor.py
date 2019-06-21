@@ -36,22 +36,18 @@ def get_nested_attr(obj, attribute: str, default=DEFAULT):
 StatesType = Sequence[str]
 
 
-def no_ok_states(
-    instance: "SimpleEntityState", attribute: str, value: StatesType
-) -> None:
+def no_ok_states(instance: "EntityState", attribute: str, value: StatesType) -> None:
     if value and instance.ok_states:
         raise ValueError("Cannot provide fault_states if also providing `ok_states`")
 
 
-def no_fault_states(
-    instance: "SimpleEntityState", attribute: str, value: StatesType
-) -> None:
+def no_fault_states(instance: "EntityState", attribute: str, value: StatesType) -> None:
     if value and instance.fault_states:
         raise ValueError("Cannot provide ok_states if also providing `fault_states`")
 
 
 def message_optional(
-    instance: "SimpleEntityState", attribute: str, value: StatesType
+    instance: "EntityState", attribute: str, value: StatesType
 ) -> None:
     if not instance.is_ok_when and value is None:
         raise ValueError(f"Must provide message if not providing `is_ok_when`. ")
@@ -62,27 +58,7 @@ GetIsOkCallableType = Callable[["EntityState", Any, hass.Hass], CheckerReturnTyp
 
 
 @attr.s(auto_attribs=True)
-class SimpleEntityState:
-    entity: str
-    entity_attr: str = "state"
-    #: If the value of this entity's state is in `fault_states`, we have a failure.
-    #: Note that you should only provide `fault_states` OR `ok_states`.
-    fault_states: StatesType = attr.ib(validator=no_ok_states, default=None)
-
-    #: If the value of this entity's state is *not* in `ok_states`, we have a
-    #: failure.  Note that you should only provide `fault_states` OR `ok_states`.
-    ok_states: StatesType = attr.ib(validator=no_fault_states, default=None)
-
-    ok_msg: Optional[str] = attr.ib(default=None)
-    fail_msg: Optional[str] = attr.ib(default=None)
-
-    @property
-    def entity_accessor(self):
-        return f"{self.entity}.{self.entity_attr}"
-
-
-@attr.s(auto_attribs=True)
-class AdvancedEntityState:
+class EntityState:
     """
     Describes how to check the state of an entity.
     """
@@ -147,7 +123,7 @@ class Checker(abc.ABC):
         self.static_fail_msg = fail_msg
         self.static_ok_msg = ok_msg
 
-        self.es: Union[SimpleEntityState, Checker.NOT_CALLED] = Checker.NOT_CALLED
+        self.es: Union[EntityState, Checker.NOT_CALLED] = Checker.NOT_CALLED
         self.actual_val: Union[Any, Checker.NOT_CALLED] = Checker.NOT_CALLED
         self.ha: Union[hass.Hass, Checker.NOT_CALLED] = Checker.NOT_CALLED
 
@@ -187,7 +163,7 @@ class Checker(abc.ABC):
         """
         return self.get_ok_msg() if is_ok else self.get_fail_msg()
 
-    def __call__(self, es: "AdvancedEntityState", actual_val: str, ha: hass.Hass):
+    def __call__(self, es: "EntityState", actual_val: str, ha: hass.Hass):
         self.es = es
         self.actual_val = actual_val
         self.ha = ha
@@ -242,55 +218,45 @@ class is_not_one_of(Checker):
 
 
 ENTITY_STATES = [
-    AdvancedEntityState(
+    EntityState(
         entity="binary_sensor.front_door_camera_online", is_ok_when=is_one_of(["on"])
     ),
-    AdvancedEntityState(
+    EntityState(
         entity="binary_sensor.garage_camera_online", is_ok_when=is_one_of(["on"])
     ),
-    AdvancedEntityState(
+    EntityState(
         entity="sensor.xiaomi_flood_sensor_1_link_quality",
         is_ok_when=is_not_one_of(["unknown"]),
     ),
-    AdvancedEntityState(
-        entity="camera.front_door", is_ok_when=is_one_of(["recording"])
-    ),
-    AdvancedEntityState(
+    EntityState(entity="camera.front_door", is_ok_when=is_one_of(["recording"])),
+    EntityState(
         entity="light.morgans_bedside_lamp", is_ok_when=is_one_of(["off", "on"])
     ),
-    AdvancedEntityState(
+    EntityState(
         entity="switch.zooz_unknown_type2400_id2400_switch",
         is_ok_when=is_one_of("off", "on"),
     ),
-    AdvancedEntityState(
+    EntityState(
         entity="water_heater.heat_pump_water_heater_gen_4",
         is_ok_when=is_not_one_of(["unavailable"]),
     ),
-    AdvancedEntityState(
+    EntityState(
         entity="sensor.xiaomi_click_1_battery",
         is_ok_when=is_("gt", 20, lambda x: int(float(x))),
     ),
-    AdvancedEntityState(
+    EntityState(
         entity="sensor.xiaomi_click_1_link_quality",
         is_ok_when=is_("gt", 35, lambda x: int(float(x))),
     ),
-    AdvancedEntityState(
+    EntityState(
         entity="cover.garage_door_opener",
         is_ok_when=is_one_of("open", "closed", "closing"),
     ),
-    AdvancedEntityState(
-        entity="light.honeywell_hall", is_ok_when=is_one_of("on", "off")
-    ),
-    AdvancedEntityState(
-        entity="light.silver_lamp", is_ok_when=is_one_of(["on", "off"])
-    ),
-    AdvancedEntityState(
-        entity="light.silver_lamp_bulb_1", is_ok_when=is_one_of(["on", "off"])
-    ),
-    AdvancedEntityState(
-        entity="light.silver_lamp_bulb_2", is_ok_when=is_one_of(["on", "off"])
-    ),
-    AdvancedEntityState(
+    EntityState(entity="light.honeywell_hall", is_ok_when=is_one_of("on", "off")),
+    EntityState(entity="light.silver_lamp", is_ok_when=is_one_of(["on", "off"])),
+    EntityState(entity="light.silver_lamp_bulb_1", is_ok_when=is_one_of(["on", "off"])),
+    EntityState(entity="light.silver_lamp_bulb_2", is_ok_when=is_one_of(["on", "off"])),
+    EntityState(
         entity="lock.schlage_allegion_be469_touchscreen_deadbolt_locked",
         is_ok_when=is_one_of(["locked", "unlocked"]),
     ),
@@ -332,9 +298,7 @@ class AbnormalStateMonitor(hass.Hass):
                 self.notify(msg, name="main_html")
                 self.log(msg, "WARNING")
 
-    def is_ok(
-        self, es: Union[SimpleEntityState, AdvancedEntityState]
-    ) -> Tuple[bool, str]:
+    def is_ok(self, es: EntityState) -> Tuple[bool, str]:
         """
         Checks an entity's state.
 
