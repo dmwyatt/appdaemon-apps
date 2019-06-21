@@ -1,8 +1,7 @@
 import abc
-import json
+import collections
 import operator
 from operator import attrgetter
-from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
 
 import appdaemon.plugins.hass.hassapi as hass
@@ -103,7 +102,7 @@ class Checker(abc.ABC):
     NOT_CALLED = make_sentinel("NOT_CALLED", "NOT_CALLED")
 
     def __init__(
-        self, expected_values: Sequence[Any], fail_msg: str = None, ok_msg: str = None
+        self, *expected_values, fail_msg: str = None, ok_msg: str = None
     ) -> None:
         """
         Set up checker with the values you're expecting to find.
@@ -173,9 +172,9 @@ class Checker(abc.ABC):
         return is_ok, self.get_msg(is_ok)
 
 
-class is_(Checker):
+class it_is(Checker):
     def __init__(
-        self, comparison: str, to: Any, converter: Callable[[Any], Any] = None
+        self, comparison: str, to: Any, convert_with: Callable[[Any], Any] = None
     ) -> None:
         """
         Creates a callable that compares an expected value to an actual value.
@@ -185,29 +184,29 @@ class is_(Checker):
         :param comparison: The comparison we're wanting to do.  Must be a string
             representing the name of a function in the `operator` module.  For example,
             `lt` for a less-than comparison
-        :param converter: An optional callable that takes the actual value and
+        :param convert_with: An optional callable that takes the actual value and
             converts it to another value before comparison to the expected value.
         """
         assert comparison in dir(
             operator
         ), f"`{comparison}` must be name of a function in the `operator` module."
 
-        if converter is None:
-            converter = lambda x: x
+        if convert_with is None:
+            convert_with = lambda x: x
 
         assert callable(
-            converter
+            convert_with
         ), "Converter must be a callable that takes a value and returns a value."
 
         self.operation = getattr(operator, comparison)
-        self.converter = converter
+        self.converter = convert_with
         self.expected_val = to
 
     def get_is_ok(self) -> bool:
         return self.operation(self.converter(self.actual_val), self.expected_val)
 
 
-class is_one_of(Checker):
+class it_is_one_of(Checker):
     def get_is_ok(self) -> bool:
         return self.actual_val in self.expected_values
 
@@ -219,59 +218,52 @@ class is_not_one_of(Checker):
 
 ENTITY_STATES = [
     EntityState(
-        entity="binary_sensor.front_door_camera_online", is_ok_when=is_one_of(["on"])
+        entity="binary_sensor.front_door_camera_online", is_ok_when=it_is_one_of("on")
     ),
     EntityState(
-        entity="binary_sensor.garage_camera_online", is_ok_when=is_one_of(["on"])
+        entity="binary_sensor.garage_camera_online", is_ok_when=it_is_one_of("on")
     ),
     EntityState(
         entity="sensor.xiaomi_flood_sensor_1_link_quality",
-        is_ok_when=is_not_one_of(["unknown"]),
+        is_ok_when=is_not_one_of("unknown"),
     ),
-    EntityState(entity="camera.front_door", is_ok_when=is_one_of(["recording"])),
+    EntityState(entity="camera.front_door", is_ok_when=it_is_one_of("recording")),
     EntityState(
-        entity="light.morgans_bedside_lamp", is_ok_when=is_one_of(["off", "on"])
+        entity="light.morgans_bedside_lamp", is_ok_when=it_is_one_of("off", "on")
     ),
     EntityState(
         entity="switch.zooz_unknown_type2400_id2400_switch",
-        is_ok_when=is_one_of("off", "on"),
+        is_ok_when=it_is_one_of("off", "on"),
     ),
     EntityState(
         entity="water_heater.heat_pump_water_heater_gen_4",
-        is_ok_when=is_not_one_of(["unavailable"]),
+        is_ok_when=is_not_one_of("unavailable"),
     ),
     EntityState(
         entity="sensor.xiaomi_click_1_battery",
-        is_ok_when=is_("gt", 20, lambda x: int(float(x))),
+        is_ok_when=it_is("gt", 20, convert_with=lambda x: int(float(x))),
     ),
     EntityState(
         entity="sensor.xiaomi_click_1_link_quality",
-        is_ok_when=is_("gt", 35, lambda x: int(float(x))),
+        is_ok_when=it_is("gt", 35, convert_with=lambda x: int(float(x))),
     ),
     EntityState(
         entity="cover.garage_door_opener",
-        is_ok_when=is_one_of("open", "closed", "closing"),
+        is_ok_when=it_is_one_of("open", "closed", "closing"),
     ),
-    EntityState(entity="light.honeywell_hall", is_ok_when=is_one_of("on", "off")),
-    EntityState(entity="light.silver_lamp", is_ok_when=is_one_of(["on", "off"])),
-    EntityState(entity="light.silver_lamp_bulb_1", is_ok_when=is_one_of(["on", "off"])),
-    EntityState(entity="light.silver_lamp_bulb_2", is_ok_when=is_one_of(["on", "off"])),
+    EntityState(entity="light.honeywell_hall", is_ok_when=it_is_one_of("on", "off")),
+    EntityState(entity="light.silver_lamp", is_ok_when=it_is_one_of("on", "off")),
+    EntityState(
+        entity="light.silver_lamp_bulb_1", is_ok_when=it_is_one_of("on", "off")
+    ),
+    EntityState(
+        entity="light.silver_lamp_bulb_2", is_ok_when=it_is_one_of("on", "off")
+    ),
     EntityState(
         entity="lock.schlage_allegion_be469_touchscreen_deadbolt_locked",
-        is_ok_when=is_one_of(["locked", "unlocked"]),
+        is_ok_when=it_is_one_of("locked", "unlocked"),
     ),
 ]
-
-
-def get_es(entity_attr: str):
-    found = []
-    for es in ENTITY_STATES:
-        if entity_attr == es.entity:
-            # print(f"{entity_attr} is in {es.entity}")
-            found.append(es)
-
-    assert len(found), f"No matching EntityState for {entity_attr}"
-    return found
 
 
 class AbnormalStateMonitor(hass.Hass):
@@ -280,12 +272,9 @@ class AbnormalStateMonitor(hass.Hass):
             self.log(f"registering listener for {es.entity}")
             self.listen_state(self.state_listener, es.entity, es=es)
 
-        es = get_es("binary_sensor.front_door_camera_online")[0]
-        self.log(self.is_ok(es))
-
-        p: Path = Path(__file__).resolve().parent / "state.json"
-        with p.open("w") as f:
-            json.dump(self.get_state(), f, indent=4, sort_keys=True)
+        # p: Path = Path(__file__).resolve().parent / "state.json"
+        # with p.open("w") as f:
+        #     json.dump(self.get_state(), f, indent=4, sort_keys=True)
 
     def state_listener(self, entity, attribute, old, new, kwargs):
         es = kwargs.get("es", None)
@@ -314,21 +303,5 @@ class AbnormalStateMonitor(hass.Hass):
             return False, err
 
         # bypass our later simplistic checks and use the checker callable
-        if hasattr(es, "is_ok_when") and callable(es.is_ok_when):
-            return es.is_ok_when(es, value, self)
-
-        def get_msg(passed: bool) -> str:
-            ok_msg = es.ok_msg or "passed check"
-            fail_msg = es.fail_msg or "failed check"
-            return (
-                f"{es.entity_accessor}: {ok_msg}"
-                if passed
-                else f"{es.entity_accessor}: {fail_msg}"
-            )
-
-        if es.fault_states:
-            passed = value not in es.fault_states
-        else:
-            passed = value in es.ok_states
-
-        return passed, get_msg(passed)
+        print(type(es.is_ok_when))
+        return es.is_ok_when(es, value, self)
