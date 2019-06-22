@@ -35,23 +35,6 @@ def get_nested_attr(obj, attribute: str, default=DEFAULT):
 StatesType = Sequence[str]
 
 
-def no_ok_states(instance: "EntityState", attribute: str, value: StatesType) -> None:
-    if value and instance.ok_states:
-        raise ValueError("Cannot provide fault_states if also providing `ok_states`")
-
-
-def no_fault_states(instance: "EntityState", attribute: str, value: StatesType) -> None:
-    if value and instance.fault_states:
-        raise ValueError("Cannot provide ok_states if also providing `fault_states`")
-
-
-def message_optional(
-    instance: "EntityState", attribute: str, value: StatesType
-) -> None:
-    if not instance.is_ok_when and value is None:
-        raise ValueError(f"Must provide message if not providing `is_ok_when`. ")
-
-
 CheckerReturnType = Tuple[bool, str]
 GetIsOkCallableType = Callable[["EntityState", Any, hass.Hass], CheckerReturnType]
 
@@ -63,11 +46,14 @@ class EntityState:
     """
 
     entity: str
+    is_ok_when: GetIsOkCallableType
+
+    #: By default we check the `state` attribute of the entity, but we can check
+    #: anything provided here.  For example, you could set it to `attributes.foobar`.
     entity_attr: str = "state"
 
-    #: If provided we use this callable to check the value.  The callable is called
-    #: with this EntityState, value we're checking, and the appdaemon api instance
-    is_ok_when: Optional[GetIsOkCallableType] = attr.ib(default=None)
+    #: The number of seconds the entity has to be in a not ok state before notifying.
+    fail_delay: int = 10
 
     @property
     def entity_accessor(self):
@@ -173,6 +159,9 @@ class Checker(abc.ABC):
 
 
 class it_is(Checker):
+    """Checker that asserts that a value is equal to an expected value."""
+
+    # noinspection PyMissingConstructor
     def __init__(
         self, comparison: str, to: Any, convert_with: Callable[[Any], Any] = None
     ) -> None:
@@ -207,27 +196,31 @@ class it_is(Checker):
 
 
 class it_is_one_of(Checker):
+    """Checker that compares the actual value to a list of acceptable values."""
+
     def get_is_ok(self) -> bool:
         return self.actual_val in self.expected_values
 
 
 class is_not_one_of(Checker):
+    """Checks that the actual value is not one of a list of unacceptable values."""
+
     def get_is_ok(self) -> bool:
         return self.actual_val not in self.expected_values
 
 
 ENTITY_STATES = [
     EntityState(
-        entity="binary_sensor.front_door_camera_online", is_ok_when=it_is_one_of("on")
+        entity="binary_sensor.front_door_camera_online", is_ok_when=it_is("eq", to="on")
     ),
     EntityState(
-        entity="binary_sensor.garage_camera_online", is_ok_when=it_is_one_of("on")
+        entity="binary_sensor.garage_camera_online", is_ok_when=it_is("eq", to="on")
     ),
     EntityState(
         entity="sensor.xiaomi_flood_sensor_1_link_quality",
         is_ok_when=is_not_one_of("unknown"),
     ),
-    EntityState(entity="camera.front_door", is_ok_when=it_is_one_of("recording")),
+    EntityState(entity="camera.front_door", is_ok_when=it_is("eq", to="recording")),
     EntityState(
         entity="light.morgans_bedside_lamp", is_ok_when=it_is_one_of("off", "on")
     ),
@@ -277,15 +270,20 @@ class AbnormalStateMonitor(hass.Hass):
         #     json.dump(self.get_state(), f, indent=4, sort_keys=True)
 
     def state_listener(self, entity, attribute, old, new, kwargs):
-        es = kwargs.get("es", None)
+        es: EntityState = kwargs.get("es", None)
         if not es:
-            self.log("State listener fired without an attached EntityState", "WARNING")
+            self.log("State listener fired without an attached EntityState", "ERROR")
         else:
+            self.log(f"Checking state of {es.entity_accessor}", "DEBUG")
             ok, msg = self.is_ok(es)
 
             if not ok:
-                self.notify(msg, name="main_html")
-                self.log(msg, "WARNING")
+                self.log(
+                    f"{es.entity_accessor} in fail state. Scheduling recheck in "
+                    f"{es.fail_delay} seconds.",
+                    "INFO",
+                )
+                self.run_in(self.is_ok_callback, es.fail_delay, es=es)
 
     def is_ok(self, es: EntityState) -> Tuple[bool, str]:
         """
@@ -302,6 +300,14 @@ class AbnormalStateMonitor(hass.Hass):
             self.log(err, "ERROR")
             return False, err
 
-        # bypass our later simplistic checks and use the checker callable
-        print(type(es.is_ok_when))
         return es.is_ok_when(es, value, self)
+
+    def is_ok_callback(self, kwargs) -> None:
+        es = kwargs["es"]
+        is_ok, msg = self.is_ok(es)
+
+        if is_ok:
+            self.log(f"{es.entity_accessor} was temporarily in a fail state.", "DEBUG")
+        else:
+            self.notify(msg, name="main_html")
+            self.log(msg, "WARNING")
