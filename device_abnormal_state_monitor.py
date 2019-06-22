@@ -1,8 +1,8 @@
 import abc
-import collections
 import operator
 from operator import attrgetter
-from typing import Any, Callable, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Sequence, Tuple, Union
+from uuid import uuid4
 
 import appdaemon.plugins.hass.hassapi as hass
 import attr
@@ -39,6 +39,10 @@ CheckerReturnType = Tuple[bool, str]
 GetIsOkCallableType = Callable[["EntityState", Any, hass.Hass], CheckerReturnType]
 
 
+def id_factory():
+    return str(uuid4())
+
+
 @attr.s(auto_attribs=True)
 class EntityState:
     """
@@ -54,6 +58,8 @@ class EntityState:
 
     #: The number of seconds the entity has to be in a not ok state before notifying.
     fail_delay: int = 10
+
+    id: str = attr.ib(factory=id_factory)
 
     @property
     def entity_accessor(self):
@@ -138,7 +144,10 @@ class Checker(abc.ABC):
 
     def get_ok_msg(self):
         self._validate_called()
-        return getattr(self, "static_ok_msg", None) or f"{self.es.entity} passed check."
+        return (
+            getattr(self, "static_ok_msg", None)
+            or f"{self.es.entity} passed check with a current value of `{self.actual_val}`."
+        )
 
     def get_msg(self, is_ok: bool) -> str:
         """
@@ -260,10 +269,13 @@ ENTITY_STATES = [
 
 
 class AbnormalStateMonitor(hass.Hass):
+    # noinspection PyAttributeOutsideInit
     def initialize(self):
         for es in ENTITY_STATES:
             self.log(f"registering listener for {es.entity}")
             self.listen_state(self.state_listener, es.entity, es=es)
+
+            self.current_failures = []
 
         # p: Path = Path(__file__).resolve().parent / "state.json"
         # with p.open("w") as f:
@@ -273,17 +285,24 @@ class AbnormalStateMonitor(hass.Hass):
         es: EntityState = kwargs.get("es", None)
         if not es:
             self.log("State listener fired without an attached EntityState", "ERROR")
-        else:
-            self.log(f"Checking state of {es.entity_accessor}", "DEBUG")
-            ok, msg = self.is_ok(es)
+            return
 
-            if not ok:
-                self.log(
-                    f"{es.entity_accessor} in fail state. Scheduling recheck in "
-                    f"{es.fail_delay} seconds.",
-                    "INFO",
-                )
-                self.run_in(self.is_ok_callback, es.fail_delay, es=es)
+        self.log(f"Checking state of {es.entity_accessor}", "DEBUG")
+        ok, msg = self.is_ok(es)
+
+        if ok:
+            # Check if this is something that failed and then returned to an ok state.
+            if es in self.current_failures:
+                self.do_ok_notify(es, msg)
+                self.current_failures.pop(self.current_failures.index(es))
+
+        else:
+            self.log(
+                f"{es.entity_accessor} in fail state. Scheduling recheck in "
+                f"{es.fail_delay} seconds.",
+                "INFO",
+            )
+            self.run_in(self.initial_failure_callback, es.fail_delay, es=es)
 
     def is_ok(self, es: EntityState) -> Tuple[bool, str]:
         """
@@ -295,6 +314,8 @@ class AbnormalStateMonitor(hass.Hass):
         """
         value = get_nested_attr(self.entities, es.entity_accessor, default=NOT_FOUND)
 
+        # Guard against mis-configuration of EntityStates or when entities have
+        # disappeared from HA for some reason.
         if value == NOT_FOUND:
             err = f"Cannot find `{es.entity_attr}`"
             self.log(err, "ERROR")
@@ -302,12 +323,36 @@ class AbnormalStateMonitor(hass.Hass):
 
         return es.is_ok_when(es, value, self)
 
-    def is_ok_callback(self, kwargs) -> None:
+    def initial_failure_callback(self, kwargs) -> None:
         es = kwargs["es"]
         is_ok, msg = self.is_ok(es)
 
         if is_ok:
             self.log(f"{es.entity_accessor} was temporarily in a fail state.", "DEBUG")
         else:
-            self.notify(msg, name="main_html")
-            self.log(msg, "WARNING")
+            self.fail_es(es)
+            self.do_fail_notify(es, msg)
+            # self.notify(msg, name="main_html")
+
+    def fail_es(self, es: EntityState) -> str:
+        if es in self.current_failures:
+            return es.id
+
+        else:
+            self.current_failures.append(es)
+            return es.id
+
+    def do_fail_notify(self, es: EntityState, msg):
+        self.log(msg, "WARNING")
+        self.call_service(
+            "notify/main_html", title="Abnormal State", message=msg, data={"tag": es.id}
+        )
+
+    def do_ok_notify(self, es: EntityState, msg):
+        self.log(msg, "INFO")
+        self.call_service(
+            "notify/main_html",
+            title="Re-Enter Normal State",
+            message=msg,
+            data={"tag": es.id},
+        )
