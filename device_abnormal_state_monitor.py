@@ -43,7 +43,7 @@ def id_factory():
     return str(uuid4())
 
 
-@attr.s(auto_attribs=True)
+@attr.s(auto_attribs=True, cmp=False)
 class EntityState:
     """
     Describes how to check the state of an entity.
