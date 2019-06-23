@@ -1,5 +1,6 @@
 import abc
 import operator
+from datetime import datetime
 from operator import attrgetter
 from typing import Any, Callable, Sequence, Tuple, Union
 from uuid import uuid4
@@ -275,7 +276,7 @@ class AbnormalStateMonitor(hass.Hass):
             self.log(f"registering listener for {es.entity}")
             self.listen_state(self.state_listener, es.entity, es=es)
 
-            self.current_failures = []
+            self.current_failures = {}
 
         # p: Path = Path(__file__).resolve().parent / "state.json"
         # with p.open("w") as f:
@@ -292,9 +293,9 @@ class AbnormalStateMonitor(hass.Hass):
 
         if ok:
             # Check if this is something that failed and then returned to an ok state.
-            if es in self.current_failures:
+            if self.is_current_failure(es):
                 self.do_ok_notify(es, msg)
-                self.current_failures.pop(self.current_failures.index(es))
+                self.pop_current_failure(es)
 
         else:
             self.log(
@@ -330,17 +331,15 @@ class AbnormalStateMonitor(hass.Hass):
         if is_ok:
             self.log(f"{es.entity_accessor} was temporarily in a fail state.", "DEBUG")
         else:
-            self.fail_es(es)
+            self.add_current_failure(es)
             self.do_fail_notify(es, msg)
             # self.notify(msg, name="main_html")
 
-    def fail_es(self, es: EntityState) -> str:
-        if es in self.current_failures:
-            return es.id
+    def add_current_failure(self, es: EntityState) -> str:
+        if not self.is_current_failure(es):
+            self.current_failures[es] = datetime.now()
 
-        else:
-            self.current_failures.append(es)
-            return es.id
+        return es.id
 
     def do_fail_notify(self, es: EntityState, msg):
         self.log(msg, "WARNING")
@@ -356,3 +355,12 @@ class AbnormalStateMonitor(hass.Hass):
             message=msg,
             data={"tag": es.id},
         )
+
+    def is_current_failure(self, es: EntityState) -> bool:
+        return es in self.current_failures
+
+    def get_current_failure(self, es: EntityState) -> EntityState:
+        return self.current_failures[es]
+
+    def pop_current_failure(self, es: EntityState) -> EntityState:
+        return self.current_failures.pop(es)
