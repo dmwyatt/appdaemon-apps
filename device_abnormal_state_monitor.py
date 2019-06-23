@@ -2,38 +2,12 @@ import abc
 import operator
 from datetime import datetime
 from operator import attrgetter
-from typing import Any, Callable, Sequence, Tuple, Union
+from typing import Any, Callable, Tuple, Union
 from uuid import uuid4
 
 import appdaemon.plugins.hass.hassapi as hass
 import attr
 from boltons.typeutils import make_sentinel
-
-NOT_FOUND = make_sentinel("NOT_FOUND", "NOT_FOUND")
-DEFAULT = make_sentinel("DEFAULT", "DEFAULT")
-
-
-def get_nested_attr(obj, attribute: str, default=DEFAULT):
-    """
-    Get a named attribute from an object.
-
-    `get_nested_attr(x, 'a.b.c.d')` is equivalent to `x.a.b.c.d`.
-
-    When a default argument is given, it is returned when any attribute in the chain
-    doesn't exist; without it, an exception is raised when a missing attribute is
-    encountered.
-    """
-    getter = attrgetter(attribute)
-    try:
-        return getter(obj)
-    except AttributeError:
-        if default != DEFAULT:
-            return default
-        else:
-            raise
-
-
-StatesType = Sequence[str]
 
 
 CheckerReturnType = Tuple[bool, str]
@@ -270,6 +244,8 @@ ENTITY_STATES = [
 
 
 class AbnormalStateMonitor(hass.Hass):
+    NOT_FOUND = make_sentinel("NOT_FOUND", "NOT_FOUND")
+
     # noinspection PyAttributeOutsideInit
     def initialize(self):
         for es in ENTITY_STATES:
@@ -317,7 +293,7 @@ class AbnormalStateMonitor(hass.Hass):
 
         # Guard against mis-configuration of EntityStates or when entities have
         # disappeared from HA for some reason.
-        if value == NOT_FOUND:
+        if value == AbnormalStateMonitor.NOT_FOUND:
             err = f"Cannot find `{es.entity_attr}`"
             self.log(err, "ERROR")
             return False, err
@@ -364,3 +340,26 @@ class AbnormalStateMonitor(hass.Hass):
 
     def pop_current_failure(self, es: EntityState) -> EntityState:
         return self.current_failures.pop(es)
+
+
+DEFAULT = make_sentinel("DEFAULT", "DEFAULT")
+
+
+def get_nested_attr(obj, attribute: str, default=DEFAULT):
+    """
+    Get a named attribute from an object.
+
+    `get_nested_attr(x, 'a.b.c.d')` is equivalent to `x.a.b.c.d`.
+
+    When a default argument is given, it is returned when any attribute in the chain
+    doesn't exist; without it, an exception is raised when a missing attribute is
+    encountered.
+    """
+    getter = attrgetter(attribute)
+    try:
+        return getter(obj)
+    except AttributeError:
+        if default != DEFAULT:
+            return default
+        else:
+            raise
