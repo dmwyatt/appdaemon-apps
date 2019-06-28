@@ -1,21 +1,17 @@
 import abc
+import json
 import operator
 from datetime import datetime
 from operator import attrgetter
-from typing import Any, Callable, Tuple, Union
-from uuid import uuid4
+from pathlib import Path
+from typing import Any, Callable, MutableMapping, Optional, Tuple, Union
 
 import appdaemon.plugins.hass.hassapi as hass
 import attr
 from boltons.typeutils import make_sentinel
 
-
 CheckerReturnType = Tuple[bool, str]
 GetIsOkCallableType = Callable[["EntityState", Any, hass.Hass], CheckerReturnType]
-
-
-def id_factory():
-    return str(uuid4())
 
 
 @attr.s(auto_attribs=True, cmp=False)
@@ -34,11 +30,16 @@ class EntityState:
     #: The number of seconds the entity has to be in a not ok state before notifying.
     fail_delay: int = 10
 
-    id: str = attr.ib(factory=id_factory)
+    # internal use only
+    id: Optional[int] = None
 
     @property
-    def entity_accessor(self):
+    def entity_accessor(self) -> str:
         return f"{self.entity}.{self.entity_attr}"
+
+    @property
+    def is_setup(self) -> bool:
+        return isinstance(self.id, int)
 
 
 class Checker(abc.ABC):
@@ -176,7 +177,15 @@ class it_is(Checker):
         self.expected_val = to
 
     def get_is_ok(self) -> bool:
-        return self.operation(self.converter(self.actual_val), self.expected_val)
+        try:
+            converted = self.converter(self.actual_val)
+        except ValueError:
+            converted = self.actual_val
+
+        try:
+            return self.operation(converted, self.expected_val)
+        except TypeError:
+            return False
 
 
 class it_is_one_of(Checker):
@@ -186,55 +195,75 @@ class it_is_one_of(Checker):
         return self.actual_val in self.expected_values
 
 
-class is_not_one_of(Checker):
+class it_is_not_one_of(Checker):
     """Checks that the actual value is not one of a list of unacceptable values."""
 
     def get_is_ok(self) -> bool:
         return self.actual_val not in self.expected_values
 
 
+it_is_not = it_is_not_one_of
+
 ENTITY_STATES = [
+    # Nest cams
     EntityState(
         entity="binary_sensor.front_door_camera_online", is_ok_when=it_is("eq", to="on")
     ),
+    EntityState(entity="camera.front_door", is_ok_when=it_is("eq", to="recording")),
     EntityState(
         entity="binary_sensor.garage_camera_online", is_ok_when=it_is("eq", to="on")
     ),
+    # Xiaomi flood sensor (water heater)
     EntityState(
-        entity="sensor.xiaomi_flood_sensor_1_link_quality",
-        is_ok_when=is_not_one_of("unknown"),
+        entity="sensor.xiaomi_flood_sensor_1_linkquality",
+        is_ok_when=it_is("gt", 30, convert_with=lambda x: int(float(x))),
     ),
-    EntityState(entity="camera.front_door", is_ok_when=it_is("eq", to="recording")),
+    EntityState(
+        entity="sensor.xiaomi_flood_sensor_1_voltage",
+        is_ok_when=it_is("ge", 3, convert_with=lambda x: int(float(x))),
+    ),
+    EntityState(
+        entity="sensor.xiaomi_flood_sensor_1_battery",
+        is_ok_when=it_is("gt", 20, convert_with=lambda x: int(float(x))),
+    ),
+    # WeMo switch (Morgan's bedside)
     EntityState(
         entity="light.morgans_bedside_lamp", is_ok_when=it_is_one_of("off", "on")
     ),
+    # Zooz/Innovelli zwave switch (Morgan's flower lights)
     EntityState(
         entity="switch.zooz_unknown_type2400_id2400_switch",
         is_ok_when=it_is_one_of("off", "on"),
     ),
     EntityState(
         entity="water_heater.heat_pump_water_heater_gen_4",
-        is_ok_when=is_not_one_of("unavailable"),
+        is_ok_when=it_is_not("unavailable"),
     ),
+    # Xiaomi Click button (Dustin's bedside)
     EntityState(
         entity="sensor.xiaomi_click_1_battery",
         is_ok_when=it_is("gt", 20, convert_with=lambda x: int(float(x))),
     ),
     EntityState(
-        entity="sensor.xiaomi_click_1_link_quality",
-        is_ok_when=it_is("gt", 35, convert_with=lambda x: int(float(x))),
+        entity="sensor.xiaomi_click_1_linkquality",
+        is_ok_when=it_is("gt", 30, convert_with=lambda x: int(float(x))),
+    ),
+    EntityState(
+        entity="sensor.xiaomi_click_1_voltage",
+        is_ok_when=it_is("ge", 3, convert_with=lambda x: int(float(x))),
     ),
     EntityState(
         entity="cover.garage_door_opener",
-        is_ok_when=it_is_one_of("open", "closed", "closing"),
+        is_ok_when=it_is_one_of("open", "closed", "closing", "opening"),
     ),
     EntityState(entity="light.honeywell_hall", is_ok_when=it_is_one_of("on", "off")),
+    # silver lamp entities
     EntityState(entity="light.silver_lamp", is_ok_when=it_is_one_of("on", "off")),
     EntityState(
-        entity="light.silver_lamp_bulb_1", is_ok_when=it_is_one_of("on", "off")
+        entity="light.silver_lamp_bulb_1_light", is_ok_when=it_is_one_of("on", "off")
     ),
     EntityState(
-        entity="light.silver_lamp_bulb_2", is_ok_when=it_is_one_of("on", "off")
+        entity="light.silver_lamp_bulb_2_light", is_ok_when=it_is_one_of("on", "off")
     ),
     EntityState(
         entity="lock.schlage_allegion_be469_touchscreen_deadbolt_locked",
@@ -242,21 +271,31 @@ ENTITY_STATES = [
     ),
 ]
 
+# Set up the ids for all the entity states
+for index_, es_ in enumerate(ENTITY_STATES):
+    es_.id = index_
 
-class AbnormalStateMonitor(hass.Hass):
+
+class StateMonitor(hass.Hass):
     NOT_FOUND = make_sentinel("NOT_FOUND", "NOT_FOUND")
 
     # noinspection PyAttributeOutsideInit
     def initialize(self):
+        self.current_failures: MutableMapping[int, datetime] = {}
+        self.scheduled_re_checks: MutableMapping[int, int] = {}
+
         for es in ENTITY_STATES:
-            self.log(f"registering listener for {es.entity}")
+            assert es.is_setup, "EntityStates have not yet been initialized."
+
+            self.log(f"Doing startup check and registering listener for {es.entity}.")
+
+            # When appdaemon is initializing this app we check all states and alert
+            # on them instead of waiting for a state change (which might be a long
+            # time or never if the device is already in the failed state).
+            self.do_entity_check(es)
+
+            # ... and then we register a state listener
             self.listen_state(self.state_listener, es.entity, es=es)
-
-            self.current_failures = {}
-
-        # p: Path = Path(__file__).resolve().parent / "state.json"
-        # with p.open("w") as f:
-        #     json.dump(self.get_state(), f, indent=4, sort_keys=True)
 
     def state_listener(self, entity, attribute, old, new, kwargs):
         es: EntityState = kwargs.get("es", None)
@@ -264,58 +303,107 @@ class AbnormalStateMonitor(hass.Hass):
             self.log("State listener fired without an attached EntityState", "ERROR")
             return
 
-        self.log(f"Checking state of {es.entity_accessor}", "DEBUG")
-        ok, msg = self.is_ok(es)
+        self.do_entity_check(es)
 
-        if ok:
-            # Check if this is something that failed and then returned to an ok state.
-            if self.is_current_failure(es):
-                self.do_ok_notify(es, msg)
-                self.pop_current_failure(es)
+    def do_entity_check(self, es: EntityState) -> None:
+        """ Checks entity state.
+
+        This is called by our registered state listener.  However, this function does
+        not actually do any actions or notifications.  The reason for this is that to
+        avoid spurious notifications and actions, this method actually schedule a
+        re-check of the entity's state in a few seconds.  This re-check is where
+        notifications and actions are fired.
+        """
+        self.log(f"Checking state of {es.entity_accessor}", "DEBUG")
+        is_ok, msg = self.is_ok(es)
+
+        if is_ok and self.is_currently_failed(es):
+            # This is something that was not-ok but then came back into compliance.
+            self.log(
+                f"{es.entity_accessor} failed but came back. Removing from "
+                f"current failures.  (msg: {msg})."
+            )
+            self.do_ok_notify(es, msg)
+            # Don't need to track it anymore.
+            self.pop_failed(es)
+            # In case the entity goes compliant and then not compliant again before
+            # the re-check happens we need to make sure there are no scheduled
+            # re-checks any time an entity transitions to an OK state.
+            self.unschedule_re_check(es)
+
+        elif is_ok:
+            # This entity is fine, no need to do anything!
+            self.log(f"{es.entity_accessor} is fine.", "DEBUG")
+
+        elif self.is_currently_failed(es):
+            # The state of a currently failed entity has changed from one failed
+            # state to another failed state, so update action/notification
+            self.do_fail_notify(es, msg)
 
         else:
+            # Entity just became non-compliant, so schedule a re-check of its state
+            # in a few seconds.  ("few seconds" means however many seconds is in
+            # `es.fail_delay`.)
             self.log(
                 f"{es.entity_accessor} in fail state. Scheduling recheck in "
                 f"{es.fail_delay} seconds.",
                 "INFO",
             )
-            self.run_in(self.initial_failure_callback, es.fail_delay, es=es)
+            self.schedule_re_check(es)
+
+    def schedule_re_check(self, es: EntityState):
+        self.scheduled_re_checks[es.id] = self.run_in(
+            self.re_check, es.fail_delay, es=es
+        )
+
+    def unschedule_re_check(self, es: EntityState):
+        if es.id in self.scheduled_re_checks:
+            self.cancel_timer(self.scheduled_re_checks.pop(es.id))
 
     def is_ok(self, es: EntityState) -> Tuple[bool, str]:
         """
-        Checks an entity's state.
+        Checks if an entity is ok.
 
         Returns a tuple.  First element is a bool where True means everything is
         fine, and False means OH NOES.  Second element of the tuple is a message
         describing the state.
         """
-        value = get_nested_attr(self.entities, es.entity_accessor, default=NOT_FOUND)
+        value = get_nested_attr(
+            self.entities, es.entity_accessor, default=StateMonitor.NOT_FOUND
+        )
 
         # Guard against mis-configuration of EntityStates or when entities have
         # disappeared from HA for some reason.
-        if value == AbnormalStateMonitor.NOT_FOUND:
-            err = f"Cannot find `{es.entity_attr}`"
+        if value == StateMonitor.NOT_FOUND:
+            err = f"Cannot find `{es.entity_accessor}`"
             self.log(err, "ERROR")
             return False, err
 
+        # The signature for `EntityState.is_ok_when` is the signature of the
+        # `Checker.__call__` and `Checker`'s descendents.
         return es.is_ok_when(es, value, self)
 
-    def initial_failure_callback(self, kwargs) -> None:
+    def re_check(self, kwargs) -> None:
+        """Do actions/notifications on failed entity state.
+
+        This simple method is the whole point of this class...notifications and
+        actions on non-compliant entity states.
+
+        See `do_entity_check` for more info.
+        """
         es = kwargs["es"]
+
+        # Don't need to track the handle for the timer that fires this method any
+        # longer...because that timer is how this method was run, so our handle to
+        # the timer is invalid anyway.
+        self.scheduled_re_checks.pop(es.id)
         is_ok, msg = self.is_ok(es)
 
         if is_ok:
             self.log(f"{es.entity_accessor} was temporarily in a fail state.", "DEBUG")
         else:
-            self.add_current_failure(es)
+            self.add_failed(es)
             self.do_fail_notify(es, msg)
-            # self.notify(msg, name="main_html")
-
-    def add_current_failure(self, es: EntityState) -> str:
-        if not self.is_current_failure(es):
-            self.current_failures[es] = datetime.now()
-
-        return es.id
 
     def do_fail_notify(self, es: EntityState, msg):
         self.log(msg, "WARNING")
@@ -325,21 +413,26 @@ class AbnormalStateMonitor(hass.Hass):
 
     def do_ok_notify(self, es: EntityState, msg):
         self.log(msg, "INFO")
+        failed_time = datetime.now() - self.get_failed(es)
         self.call_service(
             "notify/main_html",
             title="Re-Enter Normal State",
-            message=msg,
+            message=f"{msg} (Failed for: {failed_time})",
             data={"tag": es.id},
         )
 
-    def is_current_failure(self, es: EntityState) -> bool:
-        return es in self.current_failures
+    def add_failed(self, es: EntityState) -> None:
+        if not self.is_currently_failed(es):
+            self.current_failures[es.id] = datetime.now()
 
-    def get_current_failure(self, es: EntityState) -> EntityState:
-        return self.current_failures[es]
+    def is_currently_failed(self, es: EntityState) -> bool:
+        return es.id in self.current_failures
 
-    def pop_current_failure(self, es: EntityState) -> EntityState:
-        return self.current_failures.pop(es)
+    def get_failed(self, es: EntityState) -> datetime:
+        return self.current_failures[es.id]
+
+    def pop_failed(self, es: EntityState) -> datetime:
+        return self.current_failures.pop(es.id)
 
 
 DEFAULT = make_sentinel("DEFAULT", "DEFAULT")
@@ -363,3 +456,9 @@ def get_nested_attr(obj, attribute: str, default=DEFAULT):
             return default
         else:
             raise
+
+
+def write_state_to_file(h: hass.Hass):
+    p: Path = Path(__file__).resolve().parent / "state.json"
+    with p.open("w") as f:
+        json.dump(h.get_state(), f, indent=4, sort_keys=True)
